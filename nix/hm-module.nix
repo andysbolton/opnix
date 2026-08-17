@@ -219,8 +219,8 @@ in {
       useLaunchd = cfg.service.enable && config.launchd.enable;
       supervised = useSystemd || useLaunchd;
 
-      # Retrieval driven by the supervised service. Unlike the activation path
-      # this exits non-zero on failure, so the supervisor can retry.
+      # No set -e: every config file is attempted even after one fails, and a
+      # non-zero exit then reports that any of them did.
       retrieveScript = pkgs.writeShellScript "opnix-retrieve-secrets" ''
         if [ ! -f ${lib.escapeShellArg cfg.tokenFile} ]; then
           echo "WARNING: Token file ${cfg.tokenFile} does not exist!" >&2
@@ -235,14 +235,21 @@ in {
           exit 1
         fi
 
+        status=0
+
         ${lib.concatMapStringsSep "\n" (configFile: ''
             echo "Processing config file: ${configFile}"
             ${pkgsWithOverlay.opnix}/bin/opnix secret \
               -token-file ${lib.escapeShellArg cfg.tokenFile} \
               -config ${configFile} \
-              -output "$HOME"
+              -output "$HOME" || {
+              echo "ERROR: Failed to retrieve secrets from ${configFile}" >&2
+              status=1
+            }
           '')
           allConfigFiles}
+
+        exit "$status"
       '';
     in {
       # Validation assertions
@@ -290,33 +297,10 @@ in {
             echo "INFO: OpNix secrets managed by the opnix-secrets service"
           ''
           else ''
-            # Handle missing token file gracefully
-            if [ ! -f ${lib.escapeShellArg cfg.tokenFile} ]; then
-              echo "WARNING: Token file ${cfg.tokenFile} does not exist!" >&2
+            # A retrieval failure must not abort the remaining activation steps.
+            $DRY_RUN_CMD ${retrieveScript} || {
               echo "INFO: Using existing secrets, skipping updates" >&2
-              echo "INFO: Run 'opnix token set' to configure the token" >&2
-              exit 0
-            fi
-
-            if [ ! -r ${lib.escapeShellArg cfg.tokenFile} ]; then
-              echo "ERROR: Cannot read system token at ${cfg.tokenFile}" >&2
-              echo "INFO: Make sure the system token can be accessed by your user" >&2
-              exit 1
-            fi
-
-            # Retrieve secrets for each config file. A failure here must not
-            # abort the remaining activation steps.
-            ${lib.concatMapStringsSep "\n" (configFile: ''
-                echo "Processing config file: ${configFile}"
-                $DRY_RUN_CMD ${pkgsWithOverlay.opnix}/bin/opnix secret \
-                  -token-file ${lib.escapeShellArg cfg.tokenFile} \
-                  -config ${configFile} \
-                  -output "$HOME" || {
-                  echo "WARNING: Failed to retrieve secrets from ${configFile}" >&2
-                  echo "INFO: Using existing secrets, skipping updates" >&2
-                }
-              '')
-              allConfigFiles}
+            }
           ''
         );
 
