@@ -304,17 +304,13 @@ in {
               exit 1
             fi
 
-            # Retrieve secrets for each config file. A failure here must not
-            # abort the remaining activation steps.
+            # Retrieve secrets for each config file
             ${lib.concatMapStringsSep "\n" (configFile: ''
                 echo "Processing config file: ${configFile}"
                 $DRY_RUN_CMD ${pkgsWithOverlay.opnix}/bin/opnix secret \
                   -token-file ${lib.escapeShellArg cfg.tokenFile} \
                   -config ${configFile} \
-                  -output "$HOME" || {
-                  echo "WARNING: Failed to retrieve secrets from ${configFile}" >&2
-                  echo "INFO: Using existing secrets, skipping updates" >&2
-                }
+                  -output "$HOME"
               '')
               allConfigFiles}
           ''
