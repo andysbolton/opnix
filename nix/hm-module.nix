@@ -20,7 +20,8 @@
   # Validate that secret keys use proper Nix variable naming (camelCase)
   # Valid: databasePassword, sslCert, myApiKey
   # Invalid: "database/password", "ssl-cert", "my_api_key"
-  isValidNixVariableName = key: builtins.match "^[a-z][a-zA-Z0-9]*$" key != null;
+  isValidNixVariableName = key:
+    builtins.match "^[a-z][a-zA-Z0-9]*$" key != null;
 
   # Validate all secret keys
   validateSecretKeys = secrets: let
@@ -61,10 +62,7 @@
       };
 
       kind = lib.mkOption {
-        type = lib.types.enum [
-          "field"
-          "file"
-        ];
+        type = lib.types.enum ["field" "file"];
         default = "field";
         description = "Whether to resolve a text field or download a Document/attachment as raw bytes";
       };
@@ -100,10 +98,7 @@ in {
       type = lib.types.listOf lib.types.path;
       default = [];
       description = "List of secrets configuration files (GitHub #3)";
-      example = [
-        ./personal-secrets.json
-        ./work-secrets.json
-      ];
+      example = [./personal-secrets.json ./work-secrets.json];
     };
 
     tokenFile = lib.mkOption {
@@ -177,125 +172,119 @@ in {
               secretPath = resolveHomeSecretPath name secret;
             in
               secretPath
-          ) (validateSecretKeys cfg.secrets)
+          )
+          (validateSecretKeys cfg.secrets)
         else {};
     }
 
     # Main configuration only when enabled
-    (lib.mkIf cfg.enable (
-      let
-        # Validate configuration
-        hasMultipleConfigs = cfg.configFiles != [];
-        hasDeclarativeSecrets = cfg.secrets != {};
+    (lib.mkIf cfg.enable (let
+      # Validate configuration
+      hasMultipleConfigs = cfg.configFiles != [];
+      hasDeclarativeSecrets = cfg.secrets != {};
 
-        # At least one configuration method must be specified
-        configCount = lib.length (
-          lib.filter (x: x) [
-            hasMultipleConfigs
-            hasDeclarativeSecrets
-          ]
-        );
+      # At least one configuration method must be specified
+      configCount = lib.length (lib.filter (x: x) [hasMultipleConfigs hasDeclarativeSecrets]);
 
-        # Generate a temporary config file from declarative secrets
-        declarativeConfigFile =
-          if hasDeclarativeSecrets
-          then
-            pkgs.writeText "hm-opnix-declarative-secrets.json" (
-              builtins.toJSON {
-                secrets = lib.mapAttrsToList (name: secret: {
-                  path =
-                    if secret.path != null
-                    then secret.path
-                    else name;
-                  reference = secret.reference;
-                  kind = secret.kind;
-                  owner = secret.owner;
-                  group = secret.group;
-                  mode = secret.mode;
-                }) (validateSecretKeys cfg.secrets);
-              }
-            )
-          else null;
+      # Generate a temporary config file from declarative secrets
+      declarativeConfigFile =
+        if hasDeclarativeSecrets
+        then
+          pkgs.writeText "hm-opnix-declarative-secrets.json" (builtins.toJSON {
+            secrets =
+              lib.mapAttrsToList (name: secret: {
+                path =
+                  if secret.path != null
+                  then secret.path
+                  else name;
+                reference = secret.reference;
+                kind = secret.kind;
+                owner = secret.owner;
+                group = secret.group;
+                mode = secret.mode;
+              })
+              (validateSecretKeys cfg.secrets);
+          })
+        else null;
 
-        # Collect all config files
-        allConfigFiles = lib.filter (f: f != null) (
-          cfg.configFiles ++ (lib.optional hasDeclarativeSecrets declarativeConfigFile)
-        );
+      # Collect all config files
+      allConfigFiles = lib.filter (f: f != null) (
+        cfg.configFiles
+        ++ (lib.optional hasDeclarativeSecrets declarativeConfigFile)
+      );
 
-        # Which service manager, if any, can run the retrieval. These options
-        # already default per-platform, so no isLinux/isDarwin check is needed.
-        useSystemd = cfg.service.enable && config.systemd.user.enable;
-        useLaunchd = cfg.service.enable && config.launchd.enable;
-        supervised = useSystemd || useLaunchd;
+      # Which service manager, if any, can run the retrieval. Both options
+      # already default per-platform, so no isLinux/isDarwin check is needed.
+      useSystemd = cfg.service.enable && config.systemd.user.enable;
+      useLaunchd = cfg.service.enable && config.launchd.enable;
+      supervised = useSystemd || useLaunchd;
 
-        # Retrieval driven by the supervised service. Unlike the activation path
-        # this exits non-zero on failure, so the supervisor can retry.
-        retrieveScript = pkgs.writeShellScript "opnix-retrieve-secrets" ''
-          if [ ! -f ${lib.escapeShellArg cfg.tokenFile} ]; then
-            echo "WARNING: Token file ${cfg.tokenFile} does not exist!" >&2
-            echo "INFO: Using existing secrets, skipping updates" >&2
-            echo "INFO: Run 'opnix token set' to configure the token" >&2
-            exit 0
-          fi
+      # Retrieval driven by the supervised service. Unlike the activation path
+      # this exits non-zero on failure, so the supervisor can retry.
+      retrieveScript = pkgs.writeShellScript "opnix-retrieve-secrets" ''
+        if [ ! -f ${lib.escapeShellArg cfg.tokenFile} ]; then
+          echo "WARNING: Token file ${cfg.tokenFile} does not exist!" >&2
+          echo "INFO: Using existing secrets, skipping updates" >&2
+          echo "INFO: Run 'opnix token set' to configure the token" >&2
+          exit 0
+        fi
 
-          if [ ! -r ${lib.escapeShellArg cfg.tokenFile} ]; then
-            echo "ERROR: Cannot read system token at ${cfg.tokenFile}" >&2
-            echo "INFO: Make sure the system token can be accessed by your user" >&2
-            exit 1
-          fi
+        if [ ! -r ${lib.escapeShellArg cfg.tokenFile} ]; then
+          echo "ERROR: Cannot read system token at ${cfg.tokenFile}" >&2
+          echo "INFO: Make sure the system token can be accessed by your user" >&2
+          exit 1
+        fi
 
-          ${lib.concatMapStringsSep "\n" (configFile: ''
-              echo "Processing config file: ${configFile}"
-              ${pkgsWithOverlay.opnix}/bin/opnix secret \
-                -token-file ${lib.escapeShellArg cfg.tokenFile} \
-                -config ${configFile} \
-                -output "$HOME"
-            '')
-            allConfigFiles}
-        '';
-      in {
-        # Validation assertions
-        assertions =
-          [
+        ${lib.concatMapStringsSep "\n" (configFile: ''
+            echo "Processing config file: ${configFile}"
+            ${pkgsWithOverlay.opnix}/bin/opnix secret \
+              -token-file ${lib.escapeShellArg cfg.tokenFile} \
+              -config ${configFile} \
+              -output "$HOME"
+          '')
+          allConfigFiles}
+      '';
+    in {
+      # Validation assertions
+      assertions =
+        [
+          {
+            assertion = configCount > 0;
+            message = "OpNix Home Manager: At least one of configFiles or secrets must be specified";
+          }
+        ]
+        ++ (lib.flatten (lib.mapAttrsToList (name: secret: [
             {
-              assertion = configCount > 0;
-              message = "OpNix Home Manager: At least one of configFiles or secrets must be specified";
+              assertion = builtins.match "^[0-7]{3,4}$" secret.mode != null;
+              message = "OpNix secret '${name}': mode '${secret.mode}' is not a valid octal permission (e.g., 0644, 0600)";
             }
-          ]
-          ++ (lib.flatten (
-            lib.mapAttrsToList (name: secret: [
-              {
-                assertion = builtins.match "^[0-7]{3,4}$" secret.mode != null;
-                message = "OpNix secret '${name}': mode '${secret.mode}' is not a valid octal permission (e.g., 0644, 0600)";
-              }
-            ])
-            cfg.secrets
-          ));
+          ])
+          cfg.secrets));
 
-        warnings = lib.optional (cfg.service.enable && !supervised) ''
-          programs.onepassword-secrets.service.enable is set, but neither
-          systemd.user.enable nor launchd.enable is active. Falling back to
-          retrieving secrets during activation.
-        '';
+      warnings = lib.optional (cfg.service.enable && !supervised) ''
+        programs.onepassword-secrets.service.enable is set, but neither
+        systemd.user.enable nor launchd.enable is active. Falling back to
+        retrieving secrets during activation.
+      '';
 
-        # Main configuration
-        home.packages = [pkgsWithOverlay.opnix];
+      # Main configuration
+      home.packages = [pkgsWithOverlay.opnix];
 
-        # Create necessary directories for declarative secrets
-        home.activation.createOpnixDirs = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
-          # Create parent directories for all declarative secrets
-          ${lib.concatMapStringsSep "\n" (
-            name: let
-              secret = cfg.secrets.${name};
-              secretPath = resolveHomeSecretPath name secret;
-            in ''
-              $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg (builtins.dirOf secretPath)}
-            ''
-          ) (builtins.attrNames cfg.secrets)}
-        '';
+      # Create necessary directories for declarative secrets
+      home.activation.createOpnixDirs = lib.hm.dag.entryBefore ["checkLinkTargets"] ''
+        # Create parent directories for all declarative secrets
+        ${lib.concatMapStringsSep "\n" (name: let
+          secret = cfg.secrets.${name};
+          secretPath = resolveHomeSecretPath name secret;
+        in ''
+          $DRY_RUN_CMD mkdir -p ${lib.escapeShellArg (builtins.dirOf secretPath)}
+        '') (builtins.attrNames cfg.secrets)}
+      '';
 
-        # Retrieve secrets during activation, unless the service handles it
-        home.activation.retrieveOpnixSecrets = lib.hm.dag.entryAfter ["createOpnixDirs"] (
+      # Retrieve secrets during activation, unless a service handles it
+      home.activation.retrieveOpnixSecrets =
+        lib.hm.dag.entryAfter ["createOpnixDirs"]
+        (
           if supervised
           then ''
             echo "INFO: OpNix secrets managed by the opnix-secrets service"
@@ -331,27 +320,26 @@ in {
           ''
         );
 
-        systemd.user.services.opnix-secrets = lib.mkIf useSystemd {
-          Unit.Description = "OpNix Secret Management";
-          Service = {
-            Type = "oneshot";
-            RemainAfterExit = true;
-            ExecStart = "${retrieveScript}";
-            Restart = "on-failure";
-            RestartSec = "30s";
-          };
-          Install.WantedBy = ["default.target"];
+      systemd.user.services.opnix-secrets = lib.mkIf useSystemd {
+        Unit.Description = "OpNix Secret Management";
+        Service = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${retrieveScript}";
+          Restart = "on-failure";
+          RestartSec = "30s";
         };
+        Install.WantedBy = ["default.target"];
+      };
 
-        launchd.agents.opnix-secrets = {
-          enable = useLaunchd;
-          config = {
-            ProgramArguments = ["${retrieveScript}"];
-            RunAtLoad = true;
-            KeepAlive.SuccessfulExit = false;
-          };
+      launchd.agents.opnix-secrets = {
+        enable = useLaunchd;
+        config = {
+          ProgramArguments = ["${retrieveScript}"];
+          RunAtLoad = true;
+          KeepAlive.SuccessfulExit = false;
         };
-      }
-    ))
+      };
+    }))
   ];
 }
