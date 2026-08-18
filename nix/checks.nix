@@ -214,6 +214,7 @@ in {
         execStart = unit.Service.ExecStart;
         activationScript = hmServiceConfig.home.activation.retrieveOpnixSecrets;
         preventExitStatus = unit.Service.RestartPreventExitStatus;
+        startLimitBurst = unit.Unit.StartLimitBurst;
       } ''
         config_file=$(grep -o '/nix/store/[^ ]*-hm-opnix-declarative-secrets.json' "$execStart" | head -n1)
         grep -Fq '"kind":"field"' "$config_file"
@@ -221,6 +222,7 @@ in {
 
         grep -Fq 'exit "$status"' "$execStart"
         test "$preventExitStatus" = "65 75"
+        test "$startLimitBurst" -gt 0
 
         if printf '%s\n' "$activationScript" | grep -q 'opnix-retrieve-secrets'; then
           echo "activation still retrieves secrets while the service is enabled" >&2

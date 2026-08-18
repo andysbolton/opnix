@@ -219,6 +219,11 @@ in {
       useLaunchd = cfg.service.enable && config.launchd.enable;
       supervised = useSystemd || useLaunchd;
 
+      serviceStatusCommand =
+        if useSystemd
+        then "systemctl --user status opnix-secrets"
+        else "launchctl print gui/$(id -u)/org.nix-community.home.opnix-secrets";
+
       # No set -e: every config file is attempted even after one fails. The
       # opnix exit code is preserved for RestartPreventExitStatus.
       retrieveScript = pkgs.writeShellScript "opnix-retrieve-secrets" ''
@@ -300,7 +305,8 @@ in {
         (
           if supervised
           then ''
-            echo "INFO: OpNix secrets managed by the opnix-secrets service"
+            echo "INFO: OpNix secrets are managed by the opnix-secrets service"
+            echo "INFO: Check it with: ${serviceStatusCommand}"
           ''
           else ''
             # A retrieval failure must not abort the remaining activation steps.
@@ -313,9 +319,11 @@ in {
       systemd.user.services.opnix-secrets = lib.mkIf useSystemd {
         Unit = {
           Description = "OpNix Secret Management";
-          # Backoff is the throttle here, so the start limiter must not stop
-          # the retries before the network comes up.
-          StartLimitIntervalSec = 0;
+          # Must be reachable given the backoff above, which settles at four
+          # starts per hour: a unit that never hits the limit stays in
+          # auto-restart and is never reported by "systemctl --user --failed".
+          StartLimitIntervalSec = "1h";
+          StartLimitBurst = 6;
         };
         Service = {
           Type = "oneshot";
