@@ -84,7 +84,7 @@
       entryAfter = _: value: value;
     };
   });
-  hmConfig =
+  mkHmConfig = serviceEnable:
     (hmLib.evalModules {
       specialArgs = {inherit pkgs;};
       modules = [
@@ -105,12 +105,33 @@
               type = lib.types.listOf lib.types.anything;
               default = [];
             };
+            warnings = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [];
+            };
+            systemd.user.enable = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+            };
+            systemd.user.services = lib.mkOption {
+              type = lib.types.attrsOf lib.types.anything;
+              default = {};
+            };
+            launchd.enable = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+            };
+            launchd.agents = lib.mkOption {
+              type = lib.types.attrsOf lib.types.anything;
+              default = {};
+            };
           };
           config = {
             home.homeDirectory = "/home/opnix-test";
             home.username = "opnix-test";
             programs.onepassword-secrets = {
               enable = true;
+              service.enable = serviceEnable;
               secrets = {
                 defaultSecret.reference = "op://Example/Service/password";
                 fileSecret = {
@@ -123,6 +144,8 @@
         }
       ];
     }).config;
+  hmConfig = mkHmConfig false;
+  hmServiceConfig = mkHmConfig true;
   darwinConfig =
     (lib.evalModules {
       specialArgs = {inherit pkgs;};
@@ -174,11 +197,37 @@ in {
     pkgs.runCommand "opnix-hm-module-evaluation" {
       moduleScript = hmConfig.home.activation.retrieveOpnixSecrets;
     } ''
-      config_file=$(printf '%s\n' "$moduleScript" | grep -o '/nix/store/[^ ]*-hm-opnix-declarative-secrets.json' | head -n1)
+      retrieve_script=$(printf '%s\n' "$moduleScript" | grep -o '/nix/store/[^ ]*-opnix-retrieve-secrets' | head -n1)
+      test -x "$retrieve_script"
+      config_file=$(grep -o '/nix/store/[^ ]*-hm-opnix-declarative-secrets.json' "$retrieve_script" | head -n1)
       grep -Fq '"kind":"field"' "$config_file"
       grep -Fq '"kind":"file"' "$config_file"
       touch $out
     '';
+
+  # The service takes over retrieval, and activation must stop doing it.
+  hm-module-service-evaluation = let
+    unit = hmServiceConfig.systemd.user.services.opnix-secrets;
+  in
+    assert hmServiceConfig.warnings == [];
+      pkgs.runCommand "opnix-hm-module-service-evaluation" {
+        execStart = unit.Service.ExecStart;
+        activationScript = hmServiceConfig.home.activation.retrieveOpnixSecrets;
+        preventExitStatus = unit.Service.RestartPreventExitStatus;
+      } ''
+        config_file=$(grep -o '/nix/store/[^ ]*-hm-opnix-declarative-secrets.json' "$execStart" | head -n1)
+        grep -Fq '"kind":"field"' "$config_file"
+        grep -Fq '"kind":"file"' "$config_file"
+
+        grep -Fq 'exit "$status"' "$execStart"
+        test "$preventExitStatus" = "65 75"
+
+        if printf '%s\n' "$activationScript" | grep -q 'opnix-retrieve-secrets'; then
+          echo "activation still retrieves secrets while the service is enabled" >&2
+          exit 1
+        fi
+        touch $out
+      '';
 
   darwin-module-evaluation = assert darwinConfig.services.onepassword-secrets.secrets.defaultSecret.kind == "field";
   assert darwinConfig.services.onepassword-secrets.secrets.fileSecret.kind == "file";

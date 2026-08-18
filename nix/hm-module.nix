@@ -219,8 +219,8 @@ in {
       useLaunchd = cfg.service.enable && config.launchd.enable;
       supervised = useSystemd || useLaunchd;
 
-      # No set -e: every config file is attempted even after one fails, and a
-      # non-zero exit then reports that any of them did.
+      # No set -e: every config file is attempted even after one fails. The
+      # opnix exit code is preserved for RestartPreventExitStatus.
       retrieveScript = pkgs.writeShellScript "opnix-retrieve-secrets" ''
         if [ ! -f ${lib.escapeShellArg cfg.tokenFile} ]; then
           echo "WARNING: Token file ${cfg.tokenFile} does not exist!" >&2
@@ -235,6 +235,12 @@ in {
           exit 1
         fi
 
+        if [ ! -s ${lib.escapeShellArg cfg.tokenFile} ]; then
+          echo "ERROR: Token file is empty!" >&2
+          echo "INFO: Run 'opnix token set' to configure the token" >&2
+          exit 1
+        fi
+
         status=0
 
         ${lib.concatMapStringsSep "\n" (configFile: ''
@@ -243,8 +249,8 @@ in {
               -token-file ${lib.escapeShellArg cfg.tokenFile} \
               -config ${configFile} \
               -output "$HOME" || {
+              status=$?
               echo "ERROR: Failed to retrieve secrets from ${configFile}" >&2
-              status=1
             }
           '')
           allConfigFiles}
@@ -305,13 +311,21 @@ in {
         );
 
       systemd.user.services.opnix-secrets = lib.mkIf useSystemd {
-        Unit.Description = "OpNix Secret Management";
+        Unit = {
+          Description = "OpNix Secret Management";
+          # Backoff is the throttle here, so the start limiter must not stop
+          # the retries before the network comes up.
+          StartLimitIntervalSec = 0;
+        };
         Service = {
           Type = "oneshot";
           RemainAfterExit = true;
           ExecStart = "${retrieveScript}";
           Restart = "on-failure";
-          RestartSec = "30s";
+          RestartSec = "10s";
+          RestartSteps = 5;
+          RestartMaxDelaySec = "15min";
+          RestartPreventExitStatus = "65 75";
         };
         Install.WantedBy = ["default.target"];
       };
