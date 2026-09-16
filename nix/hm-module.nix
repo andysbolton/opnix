@@ -224,6 +224,14 @@ in {
         then "systemctl --user status opnix-secrets"
         else "launchctl print gui/$(id -u)/org.nix-community.home.opnix-secrets";
 
+      # A user manager cannot order units against system targets, so poll the
+      # system manager instead. See containers/podman#22197.
+      waitForNetworkScript = pkgs.writeShellScript "opnix-wait-network-online" ''
+        until ${pkgs.systemd}/bin/systemctl is-active --quiet network-online.target; do
+          ${pkgs.coreutils}/bin/sleep 0.5
+        done
+      '';
+
       # No set -e: every config file is attempted even after one fails. The
       # opnix exit code is preserved for RestartPreventExitStatus.
       retrieveScript = pkgs.writeShellScript "opnix-retrieve-secrets" ''
@@ -316,23 +324,33 @@ in {
           ''
         );
 
+      systemd.user.services.opnix-wait-network-online = lib.mkIf useSystemd {
+        Unit.Description = "Wait for system network-online.target as user";
+        Service = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${waitForNetworkScript}";
+          # Bounded so a network that never arrives does not block forever.
+          TimeoutStartSec = "90s";
+        };
+      };
+
       systemd.user.services.opnix-secrets = lib.mkIf useSystemd {
         Unit = {
           Description = "OpNix Secret Management";
-          # Must be reachable given the backoff above, which settles at four
-          # starts per hour: a unit that never hits the limit stays in
-          # auto-restart and is never reported by "systemctl --user --failed".
+          # Wants, not Requires: if the wait times out, retrieval still runs
+          # and falls back to the restart interval below.
+          Wants = ["opnix-wait-network-online.service"];
+          After = ["opnix-wait-network-online.service"];
           StartLimitIntervalSec = "1h";
-          StartLimitBurst = 6;
+          StartLimitBurst = 2;
         };
         Service = {
           Type = "oneshot";
           RemainAfterExit = true;
           ExecStart = "${retrieveScript}";
           Restart = "on-failure";
-          RestartSec = "10s";
-          RestartSteps = 5;
-          RestartMaxDelaySec = "15min";
+          RestartSec = "15min";
           RestartPreventExitStatus = "65 75";
         };
         Install.WantedBy = ["default.target"];
