@@ -84,7 +84,7 @@
       entryAfter = _: value: value;
     };
   });
-  mkHmConfig = serviceEnable:
+  mkHmConfig = supervised:
     (hmLib.evalModules {
       specialArgs = {inherit pkgs;};
       modules = [
@@ -129,9 +129,9 @@
           config = {
             home.homeDirectory = "/home/opnix-test";
             home.username = "opnix-test";
+            systemd.user.enable = supervised;
             programs.onepassword-secrets = {
               enable = true;
-              service.enable = serviceEnable;
               secrets = {
                 defaultSecret.reference = "op://Example/Service/password";
                 fileSecret = {
@@ -228,6 +228,9 @@ in {
           echo "activation still retrieves secrets while the service is enabled" >&2
           exit 1
         fi
+
+        # Activation must still trigger the unit, or a switch never refreshes.
+        printf '%s\n' "$activationScript" | grep -Fq 'opnix-secrets.service'
         touch $out
       '';
 

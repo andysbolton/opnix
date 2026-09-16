@@ -152,10 +152,12 @@ in {
     service = {
       enable = lib.mkOption {
         type = lib.types.bool;
-        default = false;
+        default = true;
+        visible = false;
         description = ''
-          Retrieve secrets from a supervised service rather than during activation:
-          a systemd user unit on Linux, a launchd agent on Darwin.
+          Deprecated and ignored. A supervised service runs the retrieval
+          wherever the platform provides one (a systemd user unit on Linux, a
+          launchd agent on Darwin); activation is the fallback when it does not.
         '';
       };
     };
@@ -215,9 +217,17 @@ in {
 
       # Which service manager, if any, can run the retrieval. Both options
       # already default per-platform, so no isLinux/isDarwin check is needed.
-      useSystemd = cfg.service.enable && config.systemd.user.enable;
-      useLaunchd = cfg.service.enable && config.launchd.enable;
+      useSystemd = config.systemd.user.enable;
+      useLaunchd = config.launchd.enable;
       supervised = useSystemd || useLaunchd;
+
+      # Activation triggers the unit rather than retrieving inline, so a switch
+      # picks up secrets rotated outside Nix. Non-blocking: the unit may wait
+      # on the network, which must not stall the switch.
+      triggerServiceCommand =
+        if useSystemd
+        then "${pkgs.systemd}/bin/systemctl --user restart --no-block opnix-secrets.service"
+        else "/bin/launchctl kickstart -k gui/$(id -u)/org.nix-community.home.opnix-secrets";
 
       serviceStatusCommand =
         if useSystemd
@@ -225,9 +235,15 @@ in {
         else "launchctl print gui/$(id -u)/org.nix-community.home.opnix-secrets";
 
       # A user manager cannot order units against system targets, so poll the
-      # system manager instead. See containers/podman#22197.
+      # system manager instead. See containers/podman#22197. Always exits 0:
+      # a network that never arrives must not stop retrieval from trying.
       waitForNetworkScript = pkgs.writeShellScript "opnix-wait-network-online" ''
+        deadline=$((SECONDS + 90))
         until ${pkgs.systemd}/bin/systemctl is-active --quiet network-online.target; do
+          if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "WARNING: network-online.target still inactive, continuing" >&2
+            break
+          fi
           ${pkgs.coreutils}/bin/sleep 0.5
         done
       '';
@@ -287,10 +303,10 @@ in {
           ])
           cfg.secrets));
 
-      warnings = lib.optional (cfg.service.enable && !supervised) ''
-        programs.onepassword-secrets.service.enable is set, but neither
-        systemd.user.enable nor launchd.enable is active. Falling back to
-        retrieving secrets during activation.
+      warnings = lib.optional (!cfg.service.enable) ''
+        programs.onepassword-secrets.service.enable is deprecated and ignored.
+        OpNix uses a supervised service wherever one is available, and falls
+        back to activation otherwise.
       '';
 
       # Main configuration
@@ -307,14 +323,16 @@ in {
         '') (builtins.attrNames cfg.secrets)}
       '';
 
-      # Retrieve secrets during activation, unless a service handles it
+      # Must follow reloadSystemd, or the trigger below restarts the old unit.
       home.activation.retrieveOpnixSecrets =
-        lib.hm.dag.entryAfter ["createOpnixDirs"]
+        lib.hm.dag.entryAfter (["createOpnixDirs"] ++ lib.optional useSystemd "reloadSystemd")
         (
           if supervised
           then ''
-            echo "INFO: OpNix secrets are managed by the opnix-secrets service"
-            echo "INFO: Check it with: ${serviceStatusCommand}"
+            $DRY_RUN_CMD ${triggerServiceCommand} || {
+              echo "WARNING: Could not trigger the opnix-secrets service" >&2
+              echo "INFO: Check it with: ${serviceStatusCommand}" >&2
+            }
           ''
           else ''
             # A retrieval failure must not abort the remaining activation steps.
@@ -324,31 +342,19 @@ in {
           ''
         );
 
-      systemd.user.services.opnix-wait-network-online = lib.mkIf useSystemd {
-        Unit.Description = "Wait for system network-online.target as user";
-        Service = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          ExecStart = "${waitForNetworkScript}";
-          # Bounded so a network that never arrives does not block forever.
-          TimeoutStartSec = "90s";
-        };
-      };
-
       systemd.user.services.opnix-secrets = lib.mkIf useSystemd {
         Unit = {
           Description = "OpNix Secret Management";
-          # Wants, not Requires: if the wait times out, retrieval still runs
-          # and falls back to the restart interval below.
-          Wants = ["opnix-wait-network-online.service"];
-          After = ["opnix-wait-network-online.service"];
           StartLimitIntervalSec = "1h";
           StartLimitBurst = 2;
         };
         Service = {
           Type = "oneshot";
           RemainAfterExit = true;
+          ExecStartPre = "${waitForNetworkScript}";
           ExecStart = "${retrieveScript}";
+          # Must cover the network wait as well as retrieval.
+          TimeoutStartSec = "5min";
           Restart = "on-failure";
           RestartSec = "15min";
           RestartPreventExitStatus = "65 75";
